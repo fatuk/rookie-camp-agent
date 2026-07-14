@@ -15,4 +15,4 @@ services:
       - key: ADMIN_ID
         sync: false
       - key: DAILY_LIMIT
-        value: "50"
+        value: "100"
