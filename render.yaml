@@ -2,7 +2,7 @@ services:
   - type: web
     name: rookie-camp-agent
     runtime: node
-    plan: free
+    plan: starter
     buildCommand: npm ci && npm run build
     startCommand: npm start
     envVars:
