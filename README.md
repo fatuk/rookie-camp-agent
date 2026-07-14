@@ -56,8 +56,8 @@ npm run dev
 | `BOT_TOKEN` | — | токен от BotFather |
 | `GEMINI_API_KEY` | — | ключ Gemini |
 | `ACCESS_CODE` | — | кодовое слово для учеников |
-| `GEMINI_MODEL` | `gemini-2.5-pro` | чат-модель Gemini |
-| `GEMINI_IMAGE_MODEL` | `gemini-2.5-flash-image` | модель генерации картинок |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | чат-модель Gemini |
+| `GEMINI_IMAGE_MODEL` | `gemini-3.1-flash-image` | модель генерации картинок |
 | `DAILY_LIMIT` | `50` | сообщений в день на ученика |
 | `HISTORY_LENGTH` | `20` | реплик диалога в контексте модели |
 | `ADMIN_ID` | — | Telegram id админа |
