@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: rookie-camp-agent
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ACCESS_CODE
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: DAILY_LIMIT
+        value: "50"
