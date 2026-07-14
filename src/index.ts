@@ -1,12 +1,15 @@
 import { createServer } from "node:http";
-import { Bot, Context, InputFile, webhookCallback } from "grammy";
+import { Bot, Context, InputFile } from "grammy";
 import { config } from "./config.js";
 import { askGemini, BaseArt, drawImage, resetHistory } from "./gemini.js";
+import { escapeHtml, fileNameFor, splitSegments, toTelegramHtml } from "./format.js";
 import { allUsers, authorize, getUser, remainingToday, tryConsume } from "./store.js";
 
 const bot = new Bot(config.botToken);
 
 const TELEGRAM_MESSAGE_LIMIT = 4096;
+// Код длиннее этого шлём файлом: в сообщении такой блок уже неудобно копировать
+const CODE_FILE_THRESHOLD = 2500;
 
 // Последний присланный учеником рисунок — ждёт команды «нарисуй …»
 const pendingArt = new Map<number, BaseArt>();
@@ -34,14 +37,38 @@ async function drawAndSend(ctx: Context, userId: number, description: string, ba
   }
 }
 
+async function sendHtml(ctx: Context, html: string, plain: string): Promise<void> {
+  try {
+    await ctx.reply(html, { parse_mode: "HTML" });
+  } catch {
+    // На случай кривой разметки — отправляем как обычный текст
+    await ctx.reply(plain);
+  }
+}
+
 async function reply(ctx: Context, text: string): Promise<void> {
-  for (let i = 0; i < text.length; i += TELEGRAM_MESSAGE_LIMIT) {
-    const chunk = text.slice(i, i + TELEGRAM_MESSAGE_LIMIT);
-    try {
-      await ctx.reply(chunk, { parse_mode: "Markdown" });
-    } catch {
-      // Модель иногда отдаёт невалидный для Telegram markdown — шлём как обычный текст
-      await ctx.reply(chunk);
+  let codeIndex = 0;
+
+  for (const segment of splitSegments(text)) {
+    if (segment.type === "code") {
+      codeIndex += 1;
+      if (segment.content.length > CODE_FILE_THRESHOLD) {
+        // Длинный код — файлом: скачивается и открывается без потери форматирования
+        await ctx.replyWithDocument(
+          new InputFile(Buffer.from(segment.content, "utf8"), fileNameFor(segment.lang, codeIndex)),
+          { caption: segment.lang ? `Код (${segment.lang}) 📄` : "Код 📄" }
+        );
+      } else {
+        // Короткий код — моноширинным блоком: тап по нему в Telegram копирует всё целиком
+        const langClass = segment.lang ? ` class="language-${segment.lang}"` : "";
+        await sendHtml(ctx, `<pre><code${langClass}>${escapeHtml(segment.content)}</code></pre>`, segment.content);
+      }
+      continue;
+    }
+
+    for (let i = 0; i < segment.content.length; i += TELEGRAM_MESSAGE_LIMIT) {
+      const chunk = segment.content.slice(i, i + TELEGRAM_MESSAGE_LIMIT);
+      await sendHtml(ctx, toTelegramHtml(chunk), chunk);
     }
   }
 }
@@ -54,7 +81,7 @@ bot.command("start", async (ctx) => {
     await reply(
       ctx,
       "Привет! 👋 Я Руби — напарница по вайбкодингу и созданию игр.\n\n" +
-        "Чтобы начать, напиши *кодовое слово*, которое тебе дал преподаватель."
+        "Чтобы начать, напиши **кодовое слово**, которое тебе дал преподаватель."
     );
   }
 });
@@ -81,7 +108,7 @@ bot.command("reset", async (ctx) => {
 
 bot.command("limit", async (ctx) => {
   if (!ctx.from) return;
-  await reply(ctx, `Сегодня у тебя осталось сообщений: *${remainingToday(ctx.from.id)}* из ${config.dailyLimit}.`);
+  await reply(ctx, `Сегодня у тебя осталось сообщений: **${remainingToday(ctx.from.id)}** из ${config.dailyLimit}.`);
 });
 
 bot.command("stats", async (ctx) => {
@@ -188,14 +215,32 @@ async function main(): Promise<void> {
   if (config.webhookUrl) {
     // Режим вебхука — для Render: входящие запросы Telegram будят сервис
     const path = `/webhook/${config.botToken}`;
-    const handler = webhookCallback(bot, "http");
+    await bot.init();
+
+    // Telegram ретраит апдейт, если вебхук не ответил быстро или упал.
+    // Поэтому: отвечаем 200 сразу, обрабатываем в фоне, повторные апдейты отбрасываем.
+    const seenUpdates = new Set<number>();
 
     const server = createServer((req, res) => {
       if (req.method === "POST" && req.url === path) {
-        handler(req, res).catch((err) => {
-          console.error("Ошибка вебхука:", err);
-          if (!res.headersSent) res.writeHead(500);
+        let body = "";
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", () => {
+          res.writeHead(200);
           res.end();
+          try {
+            const update = JSON.parse(body);
+            if (typeof update.update_id === "number") {
+              if (seenUpdates.has(update.update_id)) return;
+              seenUpdates.add(update.update_id);
+              if (seenUpdates.size > 1000) {
+                seenUpdates.delete(seenUpdates.values().next().value!);
+              }
+            }
+            bot.handleUpdate(update).catch((err) => console.error("Ошибка обработки апдейта:", err));
+          } catch (err) {
+            console.error("Некорректный апдейт от Telegram:", err);
+          }
         });
       } else {
         // health check для Render
