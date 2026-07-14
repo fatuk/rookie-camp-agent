@@ -11,8 +11,8 @@ export const config = {
   botToken: required("BOT_TOKEN"),
   geminiApiKey: required("GEMINI_API_KEY"),
   accessCode: required("ACCESS_CODE"),
-  geminiModel: process.env.GEMINI_MODEL ?? "gemini-3.1-flash-lite",
-  imageModel: process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-lite-image",
+  geminiModel: process.env.GEMINI_MODEL ?? "gemini-3.5-flash",
+  imageModel: process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-image",
   // Сколько сообщений в день доступно одному ученику
   dailyLimit: Number(process.env.DAILY_LIMIT ?? 50),
   // Сколько последних реплик диалога отправляем модели как контекст

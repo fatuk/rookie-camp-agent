@@ -17,7 +17,7 @@ export function resetHistory(userId: number): void {
 }
 
 // Запасная модель на случай, если у основной кончилась квота или её отключили
-const FALLBACK_MODEL = "gemini-3.5-flash";
+const FALLBACK_MODEL = "gemini-3.1-flash-lite";
 
 /** Квота исчерпана или модель недоступна этому ключу — стоит попробовать запасную */
 function isFallbackWorthy(err: unknown): boolean {
