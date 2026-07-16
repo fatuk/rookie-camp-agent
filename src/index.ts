@@ -52,11 +52,18 @@ async function reply(ctx: Context, text: string): Promise<void> {
   for (const segment of splitSegments(text)) {
     if (segment.type === "code") {
       codeIndex += 1;
-      if (segment.content.length > CODE_FILE_THRESHOLD) {
-        // Длинный код — файлом: скачивается и открывается без потери форматирования
+      const isHtml = segment.lang?.toLowerCase() === "html";
+      // HTML — всегда файлом (это игра, её открывают в браузере), остальное — файлом только если длинное
+      if (isHtml || segment.content.length > CODE_FILE_THRESHOLD) {
         await ctx.replyWithDocument(
           new InputFile(Buffer.from(segment.content, "utf8"), fileNameFor(segment.lang, codeIndex)),
-          { caption: segment.lang ? `Код (${segment.lang}) 📄` : "Код 📄" }
+          {
+            caption: isHtml
+              ? "Твоя игра! 🎮 Скачай файл и открой его в браузере."
+              : segment.lang
+                ? `Код (${segment.lang}) 📄`
+                : "Код 📄",
+          }
         );
       } else {
         // Короткий код — моноширинным блоком: тап по нему в Telegram копирует всё целиком
