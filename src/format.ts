@@ -40,6 +40,45 @@ export function looksLikeHtml(code: string): boolean {
   return head.startsWith("<!doctype html") || head.startsWith("<html");
 }
 
+export interface Patch {
+  search: string;
+  replace: string;
+}
+
+/** Разбирает блоки правок «НАЙТИ → ЗАМЕНИТЬ», которыми модель меняет текущий файл игры */
+export function parsePatches(code: string): Patch[] {
+  const patches: Patch[] = [];
+  const re = /<{4,}\s*НАЙТИ\s*\r?\n([\s\S]*?)\r?\n={4,}\r?\n([\s\S]*?)\r?\n>{4,}\s*ЗАМЕНИТЬ/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(code)) !== null) {
+    patches.push({ search: match[1], replace: match[2] });
+  }
+  return patches;
+}
+
+/** Применяет патчи по очереди. null — если какой-то фрагмент НАЙТИ не нашёлся в файле. */
+export function applyPatches(html: string, patches: Patch[]): string | null {
+  let result = html;
+  for (const patch of patches) {
+    let search = patch.search;
+    if (!result.includes(search)) {
+      // Модель могла прислать другой стиль переводов строк
+      search = search.replace(/\r\n/g, "\n");
+      if (!result.includes(search)) return null;
+    }
+    result = result.replace(search, patch.replace);
+  }
+  return result;
+}
+
+/** Убирает код из текста, оставляя пометку — для компактной истории диалога */
+export function stripCodeBlocks(text: string): string {
+  return text
+    .replace(/```[\w+#-]*\n?[\s\S]*?```/g, "(код отправлен ученику файлом)")
+    .replace(/```[\w+#-]*\n?[\s\S]*$/, "(код отправлен ученику файлом)")
+    .trim();
+}
+
 /** Markdown от модели → HTML-разметка Telegram (жирный, инлайн-код, ссылки) */
 export function toTelegramHtml(text: string): string {
   return text

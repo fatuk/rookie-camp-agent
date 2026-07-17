@@ -1,6 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { config } from "./config.js";
 import { IMAGE_STYLE_SUFFIX, SYSTEM_PROMPT } from "./prompts.js";
+import { stripCodeBlocks } from "./format.js";
 
 const ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
 
@@ -30,17 +31,35 @@ function isFallbackWorthy(err: unknown): boolean {
   );
 }
 
-export async function askGemini(userId: number, message: string): Promise<string> {
+export async function askGemini(userId: number, message: string, currentGame?: string): Promise<string> {
   const history = histories.get(userId) ?? [];
   history.push({ role: "user", text: message });
+
+  // Текущий файл игры передаём отдельным вступительным ходом — ровно одну актуальную
+  // версию, вместо того чтобы таскать все старые копии в истории диалога
+  const gameContext = currentGame
+    ? [
+        {
+          role: "user" as const,
+          parts: [
+            {
+              text: `ТЕКУЩИЙ ФАЙЛ ИГРЫ УЧЕНИКА (единственная актуальная версия, правки делай к нему):\n\`\`\`html\n${currentGame}\n\`\`\``,
+            },
+          ],
+        },
+      ]
+    : [];
 
   const request = (model: string) =>
     ai.models.generateContent({
       model,
-      contents: history.map((turn) => ({
-        role: turn.role,
-        parts: [{ text: turn.text }],
-      })),
+      contents: [
+        ...gameContext,
+        ...history.map((turn) => ({
+          role: turn.role,
+          parts: [{ text: turn.text }],
+        })),
+      ],
       config: {
         systemInstruction: SYSTEM_PROMPT,
         temperature: 0.7,
@@ -70,7 +89,9 @@ export async function askGemini(userId: number, message: string): Promise<string
     throw new Error("Gemini вернул пустой ответ");
   }
 
-  history.push({ role: "model", text: answer });
+  // В историю кладём ответ без кода: сам файл игры хранится отдельно и передаётся
+  // одной актуальной версией — так входные токены не разбухают от старых копий
+  history.push({ role: "model", text: stripCodeBlocks(answer) || "(ответ с кодом)" });
   // Храним только хвост диалога, чтобы не раздувать запросы
   histories.set(userId, history.slice(-config.historyLength));
   return answer;

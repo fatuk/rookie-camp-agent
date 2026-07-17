@@ -1,8 +1,18 @@
 import { createServer } from "node:http";
-import { Bot, Context, InputFile } from "grammy";
+import { Bot, Context, InputFile, Keyboard } from "grammy";
 import { config } from "./config.js";
 import { askGemini, BaseArt, drawImage, resetHistory } from "./gemini.js";
-import { escapeHtml, fileNameFor, looksLikeHtml, splitSegments, toTelegramHtml } from "./format.js";
+import {
+  applyPatches,
+  escapeHtml,
+  fileNameFor,
+  looksLikeHtml,
+  parsePatches,
+  Patch,
+  splitSegments,
+  toTelegramHtml,
+} from "./format.js";
+import { clearGame, getGame, setGame } from "./games.js";
 import { allUsers, authorize, getUser, remainingToday, tryConsume } from "./store.js";
 
 const bot = new Bot(config.botToken);
@@ -10,6 +20,11 @@ const bot = new Bot(config.botToken);
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 // Код длиннее этого шлём файлом: в сообщении такой блок уже неудобно копировать
 const CODE_FILE_THRESHOLD = 2500;
+
+const BTN_NEW_GAME = "🎮 Новая игра";
+const BTN_DOWNLOAD = "⬇️ Скачать игру";
+
+const mainKeyboard = new Keyboard().text(BTN_NEW_GAME).text(BTN_DOWNLOAD).resized().persistent();
 
 // Последний присланный учеником рисунок — ждёт команды «нарисуй …»
 const pendingArt = new Map<number, BaseArt>();
@@ -39,11 +54,18 @@ async function drawAndSend(ctx: Context, userId: number, description: string, ba
 
 async function sendHtml(ctx: Context, html: string, plain: string): Promise<void> {
   try {
-    await ctx.reply(html, { parse_mode: "HTML" });
+    await ctx.reply(html, { parse_mode: "HTML", reply_markup: mainKeyboard });
   } catch {
     // На случай кривой разметки — отправляем как обычный текст
-    await ctx.reply(plain);
+    await ctx.reply(plain, { reply_markup: mainKeyboard });
   }
+}
+
+async function sendGameFile(ctx: Context, html: string): Promise<void> {
+  await ctx.replyWithDocument(new InputFile(Buffer.from(html, "utf8"), "code.html"), {
+    caption: "Твоя игра! 🎮 Скачай файл и открой его в браузере.",
+    reply_markup: mainKeyboard,
+  });
 }
 
 async function reply(ctx: Context, text: string): Promise<void> {
@@ -58,17 +80,13 @@ async function reply(ctx: Context, text: string): Promise<void> {
     if (segment.type === "code") {
       codeIndex += 1;
       const isHtml = segment.lang?.toLowerCase() === "html" || looksLikeHtml(segment.content);
-      // HTML — всегда файлом (это игра, её открывают в браузере), остальное — файлом только если длинное
-      if (isHtml || segment.content.length > CODE_FILE_THRESHOLD) {
+      if (isHtml) {
+        await sendGameFile(ctx, segment.content);
+      } else if (segment.content.length > CODE_FILE_THRESHOLD) {
+        // Длинный код — файлом: скачивается и открывается без потери форматирования
         await ctx.replyWithDocument(
           new InputFile(Buffer.from(segment.content, "utf8"), fileNameFor(segment.lang, codeIndex)),
-          {
-            caption: isHtml
-              ? "Твоя игра! 🎮 Скачай файл и открой его в браузере."
-              : segment.lang
-                ? `Код (${segment.lang}) 📄`
-                : "Код 📄",
-          }
+          { caption: segment.lang ? `Код (${segment.lang}) 📄` : "Код 📄" }
         );
       } else {
         // Короткий код — моноширинным блоком: тап по нему в Telegram копирует всё целиком
@@ -81,6 +99,81 @@ async function reply(ctx: Context, text: string): Promise<void> {
     for (let i = 0; i < segment.content.length; i += TELEGRAM_MESSAGE_LIMIT) {
       const chunk = segment.content.slice(i, i + TELEGRAM_MESSAGE_LIMIT);
       await sendHtml(ctx, toTelegramHtml(chunk), chunk);
+    }
+  }
+}
+
+/**
+ * Обрабатывает ответ модели с учётом файла игры на сервере:
+ * полный ```html — новая версия целиком, ```patch — правки к текущему файлу.
+ * Если патч не применился, один раз просим модель прислать файл целиком.
+ */
+async function processModelAnswer(ctx: Context, userId: number, answer: string, canRetry: boolean): Promise<void> {
+  const segments = splitSegments(answer);
+  const patches: Patch[] = [];
+  let fullGame: string | undefined;
+  let codeIndex = 0;
+
+  for (const segment of segments) {
+    if (segment.type === "text" && looksLikeHtml(segment.content)) {
+      segment.type = "code";
+      segment.lang = "html";
+    }
+
+    if (segment.type === "code") {
+      const parsed = parsePatches(segment.content);
+      if (parsed.length > 0) {
+        patches.push(...parsed);
+        continue; // патчи ученику не показываем — он получит готовый файл
+      }
+      if (segment.lang?.toLowerCase() === "html" || looksLikeHtml(segment.content)) {
+        fullGame = segment.content; // отправим после текста, одной актуальной версией
+        continue;
+      }
+      codeIndex += 1;
+      if (segment.content.length > CODE_FILE_THRESHOLD) {
+        await ctx.replyWithDocument(
+          new InputFile(Buffer.from(segment.content, "utf8"), fileNameFor(segment.lang, codeIndex)),
+          { caption: segment.lang ? `Код (${segment.lang}) 📄` : "Код 📄" }
+        );
+      } else {
+        const langClass = segment.lang ? ` class="language-${segment.lang}"` : "";
+        await sendHtml(ctx, `<pre><code${langClass}>${escapeHtml(segment.content)}</code></pre>`, segment.content);
+      }
+      continue;
+    }
+
+    for (let i = 0; i < segment.content.length; i += TELEGRAM_MESSAGE_LIMIT) {
+      const chunk = segment.content.slice(i, i + TELEGRAM_MESSAGE_LIMIT);
+      await sendHtml(ctx, toTelegramHtml(chunk), chunk);
+    }
+  }
+
+  if (fullGame) {
+    setGame(userId, fullGame);
+    await sendGameFile(ctx, fullGame);
+    return;
+  }
+
+  if (patches.length > 0) {
+    const current = getGame(userId);
+    const updated = current ? applyPatches(current, patches) : null;
+    if (updated) {
+      setGame(userId, updated);
+      await sendGameFile(ctx, updated);
+      return;
+    }
+    if (canRetry) {
+      // Модель промахнулась с фрагментом НАЙТИ — просим файл целиком, ученик этого не видит
+      console.warn(`Патч не применился (user ${userId}), запрашиваю файл целиком`);
+      const retry = await askGemini(
+        userId,
+        "Твои правки не применились: фрагмент НАЙТИ не совпал с текущим файлом символ в символ. Пришли, пожалуйста, ВЕСЬ обновлённый файл игры целиком одним блоком ```html.",
+        getGame(userId)
+      );
+      await processModelAnswer(ctx, userId, retry, false);
+    } else {
+      await reply(ctx, "Что-то у меня правка не склеилась 🙈 Напиши «собери игру заново» — пришлю свежий файл!");
     }
   }
 }
@@ -107,15 +200,37 @@ bot.command("help", async (ctx) => {
       "• «Помоги найти ошибку в моём коде»\n" +
       "• «Нарисуй пиксельного дракона для игры» 🎨\n\n" +
       "А ещё пришли фото своего рисунка — и я нарисую по нему игровой арт! 🖼️\n\n" +
-      "Команды:\n" +
-      "/reset — начать разговор заново\n" +
-      "/limit — сколько сообщений осталось сегодня"
+      "Кнопки под чатом:\n" +
+      "🎮 Новая игра — начать новый проект с чистого листа\n" +
+      "⬇️ Скачать игру — прислать файл текущей игры"
   );
 });
 
+async function startNewGame(ctx: Context, userId: number): Promise<void> {
+  resetHistory(userId);
+  clearGame(userId);
+  await reply(
+    ctx,
+    "Начинаем новую игру! 🎮 Прошлая забыта (файл у тебя остался).\n" +
+      "Во что сыграем? Платформер, гонки, кликер — или придумаем что-то своё?"
+  );
+}
+
+async function downloadGame(ctx: Context, userId: number): Promise<void> {
+  const game = getGame(userId);
+  if (game) {
+    await sendGameFile(ctx, game);
+  } else {
+    await reply(ctx, "У нас пока нет игры 🙃 Напиши, какую хочешь сделать, — и начнём!");
+  }
+}
+
 bot.command("reset", async (ctx) => {
-  if (ctx.from) resetHistory(ctx.from.id);
-  await reply(ctx, "Начинаем с чистого листа! 📝 О чём поговорим?");
+  if (ctx.from) await startNewGame(ctx, ctx.from.id);
+});
+
+bot.command("game", async (ctx) => {
+  if (ctx.from) await downloadGame(ctx, ctx.from.id);
 });
 
 bot.command("limit", async (ctx) => {
@@ -191,6 +306,16 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
+  // Кнопки клавиатуры — бесплатные действия, лимит не тратят
+  if (text === BTN_NEW_GAME) {
+    await startNewGame(ctx, from.id);
+    return;
+  }
+  if (text === BTN_DOWNLOAD) {
+    await downloadGame(ctx, from.id);
+    return;
+  }
+
   if (!tryConsume(from.id)) {
     await reply(
       ctx,
@@ -211,8 +336,8 @@ bot.on("message:text", async (ctx) => {
 
   await ctx.replyWithChatAction("typing");
   try {
-    const answer = await askGemini(from.id, text);
-    await reply(ctx, answer);
+    const answer = await askGemini(from.id, text, getGame(from.id));
+    await processModelAnswer(ctx, from.id, answer, true);
   } catch (err) {
     console.error("Ошибка Gemini:", err);
     await reply(ctx, "Ой, у меня что-то заискрило в проводах 🔌 Попробуй ещё раз через минутку!");
@@ -224,6 +349,13 @@ bot.catch((err) => {
 });
 
 async function main(): Promise<void> {
+  await bot.api.setMyCommands([
+    { command: "reset", description: "🎮 Начать новую игру" },
+    { command: "game", description: "⬇️ Скачать текущую игру" },
+    { command: "limit", description: "Сколько сообщений осталось сегодня" },
+    { command: "help", description: "Как пользоваться ботом" },
+  ]);
+
   if (config.webhookUrl) {
     // Режим вебхука — для Render: входящие запросы Telegram будят сервис
     const path = `/webhook/${config.botToken}`;
