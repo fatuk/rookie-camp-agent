@@ -199,7 +199,9 @@ bot.command("help", async (ctx) => {
       "• «Придумай механику для моего платформера»\n" +
       "• «Помоги найти ошибку в моём коде»\n" +
       "• «Нарисуй пиксельного дракона для игры» 🎨\n\n" +
-      "А ещё пришли фото своего рисунка — и я нарисую по нему игровой арт! 🖼️\n\n" +
+      "А ещё:\n" +
+      "🖼️ пришли фото своего рисунка — нарисую по нему игровой арт\n" +
+      "📄 пришли файл игры (.html) — продолжим делать её вместе\n\n" +
       "Кнопки под чатом:\n" +
       "🎮 Новая игра — начать новый проект с чистого листа\n" +
       "⬇️ Скачать игру — прислать файл текущей игры"
@@ -244,6 +246,48 @@ bot.command("stats", async (ctx) => {
     ([id, u]) => `${u.name} (${id}): сегодня ${u.day === new Date().toISOString().slice(0, 10) ? u.usedToday : 0}, всего ${u.totalMessages}`
   );
   await reply(ctx, lines.length ? lines.join("\n") : "Пока никто не авторизовался.");
+});
+
+// Максимальный размер принимаемого файла игры: больше — это уже не детский проект,
+// а лишние десятки тысяч входных токенов в каждом запросе
+const MAX_GAME_FILE_SIZE = 256 * 1024;
+
+bot.on("message:document", async (ctx) => {
+  const from = ctx.from;
+  if (!getUser(from.id)?.authorized) {
+    await reply(ctx, "Сначала напиши кодовое слово от преподавателя! 🔑");
+    return;
+  }
+
+  const doc = ctx.message.document;
+  const name = doc.file_name ?? "";
+  if (!/\.html?$/i.test(name) && doc.mime_type !== "text/html") {
+    await reply(ctx, "Я умею продолжать только HTML-игры 🙂 Пришли файл с расширением **.html** — например, тот, что я тебе присылала.");
+    return;
+  }
+  if ((doc.file_size ?? 0) > MAX_GAME_FILE_SIZE) {
+    await reply(ctx, "Ого, какой большой файл! 😅 Я беру игры до 256 КБ — пришли файл поменьше.");
+    return;
+  }
+
+  try {
+    const file = await ctx.getFile();
+    const res = await fetch(`https://api.telegram.org/file/bot${config.botToken}/${file.file_path}`);
+    if (!res.ok) throw new Error(`Не удалось скачать файл: ${res.status}`);
+    const html = await res.text();
+
+    // Начинаем с чистого контекста: теперь работаем именно над этой игрой
+    resetHistory(from.id);
+    setGame(from.id, html);
+    await reply(
+      ctx,
+      "Загрузила твою игру! 🎮 Теперь она у меня, будем улучшать её.\n" +
+        "Что добавим? Новых врагов, очки, звуки, уровни?"
+    );
+  } catch (err) {
+    console.error("Ошибка загрузки файла игры:", err);
+    await reply(ctx, "Не получилось открыть файл 🙈 Попробуй прислать ещё раз!");
+  }
 });
 
 bot.on("message:photo", async (ctx) => {
