@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { Bot, Context, InputFile } from "grammy";
 import { config } from "./config.js";
 import { askGemini, BaseArt, drawImage, resetHistory } from "./gemini.js";
-import { escapeHtml, fileNameFor, splitSegments, toTelegramHtml } from "./format.js";
+import { escapeHtml, fileNameFor, looksLikeHtml, splitSegments, toTelegramHtml } from "./format.js";
 import { allUsers, authorize, getUser, remainingToday, tryConsume } from "./store.js";
 
 const bot = new Bot(config.botToken);
@@ -50,9 +50,14 @@ async function reply(ctx: Context, text: string): Promise<void> {
   let codeIndex = 0;
 
   for (const segment of splitSegments(text)) {
+    // Модель может прислать HTML-документ вообще без фенса — это тоже игра, шлём файлом
+    if (segment.type === "text" && looksLikeHtml(segment.content)) {
+      segment.type = "code";
+      segment.lang = "html";
+    }
     if (segment.type === "code") {
       codeIndex += 1;
-      const isHtml = segment.lang?.toLowerCase() === "html";
+      const isHtml = segment.lang?.toLowerCase() === "html" || looksLikeHtml(segment.content);
       // HTML — всегда файлом (это игра, её открывают в браузере), остальное — файлом только если длинное
       if (isHtml || segment.content.length > CODE_FILE_THRESHOLD) {
         await ctx.replyWithDocument(

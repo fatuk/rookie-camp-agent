@@ -18,10 +18,26 @@ export function splitSegments(answer: string): Segment[] {
     if (code) segments.push({ type: "code", content: code, lang: match[1] || undefined });
     cursor = match.index + match[0].length;
   }
-  const tail = answer.slice(cursor).trim();
-  if (tail) segments.push({ type: "text", content: tail });
+  const tail = answer.slice(cursor);
+  // Незакрытый фенс: модель оборвала ответ или забыла ``` — хвост всё равно считаем кодом,
+  // иначе он уйдёт «текстом» и расползётся на несколько сообщений
+  const unclosed = /```([\w+#-]*)\n?([\s\S]*)$/.exec(tail);
+  if (unclosed) {
+    const before = tail.slice(0, unclosed.index).trim();
+    if (before) segments.push({ type: "text", content: before });
+    const code = unclosed[2].trim();
+    if (code) segments.push({ type: "code", content: code, lang: unclosed[1] || undefined });
+  } else if (tail.trim()) {
+    segments.push({ type: "text", content: tail.trim() });
+  }
 
   return segments;
+}
+
+/** Похоже на цельный HTML-документ (даже если модель не пометила блок как ```html) */
+export function looksLikeHtml(code: string): boolean {
+  const head = code.trimStart().slice(0, 200).toLowerCase();
+  return head.startsWith("<!doctype html") || head.startsWith("<html");
 }
 
 /** Markdown от модели → HTML-разметка Telegram (жирный, инлайн-код, ссылки) */

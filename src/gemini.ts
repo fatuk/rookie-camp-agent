@@ -44,9 +44,9 @@ export async function askGemini(userId: number, message: string): Promise<string
       config: {
         systemInstruction: SYSTEM_PROMPT,
         temperature: 0.7,
-        // У 2.5-pro размышления тратят выходной бюджет — лимит должен быть щедрым,
-        // иначе ответ обрежется в пустоту; краткость задаём промптом
-        maxOutputTokens: 8192,
+        // Размышления модели тратят выходной бюджет, а игра — это целый HTML-файл:
+        // при тесном лимите ответ обрывается на середине кода (и файл не собирается)
+        maxOutputTokens: 16384,
       },
     });
 
